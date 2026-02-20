@@ -1,0 +1,1 @@
+{"symbol": "INFQ", "severity": "high", "rule_id": "TAIL_RISK", "ts": "2026-02-19T00:00:00+00:00", "msg": "Tail risk: ret=-7.00%, vol_pct=0.89, vol_z=1.73", "context": {"ret": -0.07002039428959894, "vol_z": 1.7287093301880647, "vol_pct": 0.8913043478260869, "rv_last": 0.08933666157906027}}

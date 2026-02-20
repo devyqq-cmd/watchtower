@@ -1,0 +1,14 @@
+tickers:
+  - "0700.HK"
+  - "COIN"
+  - "INFQ"
+
+# yfinance interval, 对应 1 小时 K 线
+interval: "1d"
+
+# 拉取最近多少天的数据
+days: 180
+
+# SQLite 数据库路径，可被 WATCHTOWER_DB_PATH 环境变量覆盖
+db_path: "watchtower.db"
+
