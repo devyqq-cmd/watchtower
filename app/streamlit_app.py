@@ -115,3 +115,113 @@ if p.exists():
     st.code("\n".join(lines), language="json")
 else:
     st.caption("No alerts yet.")
+# =========================
+# Alerts UI (watchtower)
+# =========================
+import json
+from pathlib import Path
+
+def _load_alerts_df():
+    """
+    Load alerts from jsonl files.
+    Prefer data/alerts.jsonl; if missing, fall back to data/alerts.jsonl.bak
+    """
+    paths = [Path("data/alerts.jsonl"), Path("data/alerts.jsonl.bak")]
+    p = next((x for x in paths if x.exists()), None)
+    if not p:
+        return None, None
+
+    rows = []
+    for line in p.read_text(encoding="utf-8").splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            rows.append(json.loads(line))
+        except Exception:
+            continue
+
+    if not rows:
+        return p, None
+
+    df = pd.DataFrame(rows)
+
+    # normalize columns
+    if "ts" in df.columns:
+        df["ts"] = pd.to_datetime(df["ts"], utc=True, errors="coerce")
+    if "context" in df.columns:
+        # expand some context fields if present
+        def ctx_get(x, k):
+            try:
+                return (x or {}).get(k, None)
+            except Exception:
+                return None
+        df["ret"] = df["context"].apply(lambda x: ctx_get(x, "ret"))
+        df["vol_pct"] = df["context"].apply(lambda x: ctx_get(x, "vol_pct"))
+        df["vol_z"] = df["context"].apply(lambda x: ctx_get(x, "vol_z"))
+        df["rv_last"] = df["context"].apply(lambda x: ctx_get(x, "rv_last"))
+
+    # prettify
+    if "ret" in df.columns:
+        df["ret"] = pd.to_numeric(df["ret"], errors="coerce")
+    for c in ["vol_pct", "vol_z", "rv_last"]:
+        if c in df.columns:
+            df[c] = pd.to_numeric(df[c], errors="coerce")
+
+    return p, df
+
+
+st.divider()
+st.subheader("Key Alerts")
+
+p, adf = _load_alerts_df()
+if p is None:
+    st.caption("No alerts file yet. (data/alerts.jsonl)")
+elif adf is None or adf.empty:
+    st.caption(f"No alerts in {p}.")
+else:
+    # filters
+    sev_order = ["high", "med", "low"]
+    sevs = [s for s in sev_order if s in set(adf.get("severity", []))] or sorted(adf.get("severity", []).dropna().unique())
+    symbols = sorted(adf.get("symbol", pd.Series(dtype=str)).dropna().unique())
+
+    c1, c2, c3 = st.columns([1, 1, 2])
+    with c1:
+        sev_sel = st.multiselect("Severity", options=sevs, default=sevs)
+    with c2:
+        sym_sel = st.multiselect("Symbol", options=symbols, default=symbols[: min(5, len(symbols))] if symbols else [])
+    with c3:
+        n = st.slider("Show latest N", min_value=10, max_value=500, value=100, step=10)
+
+    df = adf.copy()
+    if sev_sel and "severity" in df.columns:
+        df = df[df["severity"].isin(sev_sel)]
+    if sym_sel and "symbol" in df.columns:
+        df = df[df["symbol"].isin(sym_sel)]
+
+    if "ts" in df.columns:
+        df = df.sort_values("ts", ascending=False)
+
+    df = df.head(n)
+
+    show_cols = [c for c in ["ts", "symbol", "severity", "rule_id", "msg", "ret", "vol_pct", "vol_z"] if c in df.columns]
+    df_show = df[show_cols].copy()
+
+    # formatting
+    if "ret" in df_show.columns:
+        df_show["ret"] = df_show["ret"].map(lambda x: None if pd.isna(x) else f"{x:+.2%}")
+    if "vol_pct" in df_show.columns:
+        df_show["vol_pct"] = df_show["vol_pct"].map(lambda x: None if pd.isna(x) else f"{x:.2f}")
+    if "vol_z" in df_show.columns:
+        df_show["vol_z"] = df_show["vol_z"].map(lambda x: None if pd.isna(x) else f"{x:.2f}")
+
+    def _hl(row):
+        sev = str(row.get("severity", "")).lower()
+        if sev == "high":
+            return ["font-weight:700"] * len(row)
+        if sev == "med":
+            return ["font-weight:600"] * len(row)
+        return [""] * len(row)
+
+    st.caption(f"Source: {p}")
+    st.dataframe(df_show.style.apply(_hl, axis=1), use_container_width=True)
