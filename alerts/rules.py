@@ -18,4 +18,4 @@ class AlertConfig:
     cooldown_hours: int = 6
 
     # minimum history required to avoid noisy alerts (new listings)
-    min_bars: int = 120
+    min_bars: int = 80
