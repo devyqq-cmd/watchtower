@@ -104,17 +104,6 @@ def main() -> None:
     with col_d:
         st.metric("成交量合计", f"{df['volume'].sum():.0f}")
 
-
-if __name__ == "__main__":
-    main()
-
-st.subheader("Key Alerts (jsonl)")
-p = Path("data/alerts.jsonl")
-if p.exists():
-    lines = p.read_text(encoding="utf-8").splitlines()[-50:]
-    st.code("\n".join(lines), language="json")
-else:
-    st.caption("No alerts yet.")
 # =========================
 # Alerts UI (watchtower)
 # =========================
@@ -171,57 +160,63 @@ def _load_alerts_df():
     return p, df
 
 
-st.divider()
-st.subheader("Key Alerts")
+    st.divider()
+    st.subheader("Key Alerts")
 
-p, adf = _load_alerts_df()
-if p is None:
-    st.caption("No alerts file yet. (data/alerts.jsonl)")
-elif adf is None or adf.empty:
-    st.caption(f"No alerts in {p}.")
-else:
-    # filters
-    sev_order = ["high", "med", "low"]
-    sevs = [s for s in sev_order if s in set(adf.get("severity", []))] or sorted(adf.get("severity", []).dropna().unique())
-    symbols = sorted(adf.get("symbol", pd.Series(dtype=str)).dropna().unique())
+    p, adf = _load_alerts_df()
+    if p is None:
+        st.caption("No alerts file yet. (data/alerts.jsonl)")
+    elif adf is None or adf.empty:
+        st.caption(f"No alerts in {p}.")
+    else:
+        # filters
+        sev_order = ["high", "med", "low"]
+        sevs = [s for s in sev_order if s in set(adf.get("severity", []))] or sorted(adf.get("severity", []).dropna().unique())
+        symbols = sorted(adf.get("symbol", pd.Series(dtype=str)).dropna().unique())
 
-    c1, c2, c3 = st.columns([1, 1, 2])
-    with c1:
-        sev_sel = st.multiselect("Severity", options=sevs, default=sevs)
-    with c2:
-        sym_sel = st.multiselect("Symbol", options=symbols, default=symbols[: min(5, len(symbols))] if symbols else [])
-    with c3:
-        n = st.slider("Show latest N", min_value=10, max_value=500, value=100, step=10)
+        c1, c2, c3 = st.columns([1, 1, 2])
+        with c1:
+            sev_sel = st.multiselect("Severity", options=sevs, default=sevs)
+        with c2:
+            sym_sel = st.multiselect("Symbol", options=symbols, default=symbols[: min(5, len(symbols))] if symbols else [])
+        with c3:
+            n = st.slider("Show latest N", min_value=10, max_value=500, value=100, step=10)
 
-    df = adf.copy()
-    if sev_sel and "severity" in df.columns:
-        df = df[df["severity"].isin(sev_sel)]
-    if sym_sel and "symbol" in df.columns:
-        df = df[df["symbol"].isin(sym_sel)]
+        df = adf.copy()
+        if sev_sel and "severity" in df.columns:
+            df = df[df["severity"].isin(sev_sel)]
+        if sym_sel and "symbol" in df.columns:
+            df = df[df["symbol"].isin(sym_sel)]
 
-    if "ts" in df.columns:
-        df = df.sort_values("ts", ascending=False)
+        if "ts" in df.columns:
+            df = df.sort_values("ts", ascending=False)
 
-    df = df.head(n)
+        df = df.head(n)
 
-    show_cols = [c for c in ["ts", "symbol", "severity", "rule_id", "msg", "ret", "vol_pct", "vol_z"] if c in df.columns]
-    df_show = df[show_cols].copy()
+        show_cols = [c for c in ["ts", "symbol", "severity", "rule_id", "msg", "ret", "vol_pct", "vol_z"] if c in df.columns]
+        df_show = df[show_cols].copy()
 
-    # formatting
-    if "ret" in df_show.columns:
-        df_show["ret"] = df_show["ret"].map(lambda x: None if pd.isna(x) else f"{x:+.2%}")
-    if "vol_pct" in df_show.columns:
-        df_show["vol_pct"] = df_show["vol_pct"].map(lambda x: None if pd.isna(x) else f"{x:.2f}")
-    if "vol_z" in df_show.columns:
-        df_show["vol_z"] = df_show["vol_z"].map(lambda x: None if pd.isna(x) else f"{x:.2f}")
+        # formatting
+        if "ret" in df_show.columns:
+            df_show["ret"] = df_show["ret"].map(lambda x: None if pd.isna(x) else f"{x:+.2%}")
+        if "vol_pct" in df_show.columns:
+            df_show["vol_pct"] = df_show["vol_pct"].map(lambda x: None if pd.isna(x) else f"{x:.2f}")
+        if "vol_z" in df_show.columns:
+            df_show["vol_z"] = df_show["vol_z"].map(lambda x: None if pd.isna(x) else f"{x:.2f}")
 
-    def _hl(row):
-        sev = str(row.get("severity", "")).lower()
-        if sev == "high":
-            return ["font-weight:700"] * len(row)
-        if sev == "med":
-            return ["font-weight:600"] * len(row)
-        return [""] * len(row)
+        def _hl(row):
+            sev = str(row.get("severity", "")).lower()
+            if sev == "high":
+                return ["font-weight:700"] * len(row)
+            if sev == "med":
+                return ["font-weight:600"] * len(row)
+            return [""] * len(row)
 
-    st.caption(f"Source: {p}")
-    st.dataframe(df_show.style.apply(_hl, axis=1), use_container_width=True)
+        st.caption(f"Source: {p}")
+        st.dataframe(df_show.style.apply(_hl, axis=1), use_container_width=True)
+
+
+if __name__ == "__main__":
+    main()
+
+
