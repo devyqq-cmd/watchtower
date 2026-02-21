@@ -60,23 +60,48 @@ def _should_emit(symbol: str, rule_id: str, ts_iso: str, cooldown_hours: int) ->
     return True
 
 
+def _wilder_rsi(close: pd.Series, period: int) -> pd.Series:
+    """
+    Wilder 平滑 RSI，与 TradingView ta.rsi() 算法一致。
+    种子：前 period 根K线的简单均值；之后每根K线做指数平滑。
+    avg = (prev_avg * (period-1) + current) / period
+    """
+    delta = close.diff()
+    gain = delta.clip(lower=0)
+    loss = -delta.clip(upper=0)
+
+    avg_gain = pd.Series(np.nan, index=close.index)
+    avg_loss = pd.Series(np.nan, index=close.index)
+
+    # 种子位置：iloc[period]（iloc[0] 的 diff 是 NaN，所以用 iloc[1..period] 共 period 个值）
+    seed = period
+    if len(close) <= seed:
+        return avg_gain  # 数据不足，返回全 NaN
+
+    avg_gain.iloc[seed] = gain.iloc[1 : seed + 1].mean()
+    avg_loss.iloc[seed] = loss.iloc[1 : seed + 1].mean()
+
+    for i in range(seed + 1, len(close)):
+        avg_gain.iloc[i] = (avg_gain.iloc[i - 1] * (period - 1) + gain.iloc[i]) / period
+        avg_loss.iloc[i] = (avg_loss.iloc[i - 1] * (period - 1) + loss.iloc[i]) / period
+
+    rs = avg_gain / avg_loss.replace(0, np.nan)
+    return 100 - (100 / (1 + rs))
+
+
 def compute_features(df: pd.DataFrame, cfg: AlertConfig) -> pd.DataFrame:
     """
     Enhanced feature engineering for long-term risk assessment.
     """
     out = df.copy()
     out["ret"] = out["close"].pct_change()
-    
+
     # 1. Trend: EMAs
     out["ema_fast"] = out["close"].ewm(span=cfg.ema_fast, adjust=False).mean()
     out["ema_slow"] = out["close"].ewm(span=cfg.ema_slow, adjust=False).mean()
-    
-    # 2. Momentum: RSI (Manual Implementation to avoid pandas-ta dependency)
-    delta = out["close"].diff()
-    gain = (delta.where(delta > 0, 0)).rolling(window=cfg.rsi_period).mean()
-    loss = (-delta.where(delta < 0, 0)).rolling(window=cfg.rsi_period).mean()
-    rs = gain / loss.replace(0, np.nan)
-    out["rsi"] = 100 - (100 / (1 + rs))
+
+    # 2. Momentum: Wilder RSI（与 TradingView 对齐）
+    out["rsi"] = _wilder_rsi(out["close"], cfg.rsi_period)
     
     # 3. Overextension: Distance from EMA_slow
     out["dist_ema"] = (out["close"] - out["ema_slow"]) / out["ema_slow"]
@@ -207,19 +232,29 @@ def evaluate_alerts(symbol: str, df: pd.DataFrame, cfg: AlertConfig, global_vix:
 
     # 1. CORE: Risk Scoring Alerts (Discipline)
     if risk_score >= 80:
-        emit("RISK_EXTREME", "high", f"EXTREME RISK ({risk_score:.0f}/100): Extreme Greed or Structural Breakdown. ACTION: STRICT PROFIT TAKING / DE-LEVERAGE.")
+        emit("RISK_EXTREME", "high", f"极端风险 ({risk_score:.0f}/100)：市场严重过热或结构性崩溃。操作建议：严格止盈 / 大幅降低仓位。")
     elif risk_score >= 60:
-        emit("RISK_HIGH", "med", f"High Risk ({risk_score:.0f}/100): Overextended Upwards or Extreme Panic.")
-    elif risk_score <= 20:
-        # emit("RISK_LOW", "info", f"Low Risk ({risk_score:.0f}/100): Bullish Trend & Healthy Consolidation.")
-        pass
+        emit("RISK_HIGH", "med", f"高风险 ({risk_score:.0f}/100)：价格过度偏离均值或极度恐慌。操作建议：考虑减仓，控制风险敞口。")
+    elif risk_score <= 25:
+        emit("RISK_LOW", "buy", f"低风险区间 ({risk_score:.0f}/100)：趋势健康，未过热。长线视角下的逢低布局机会。")
 
-    # 2. Event Shock (Keep original logic but integrate)
+    # 2. 超卖机会信号（独立于风险评分，专为长线买点设计）
+    rsi_val = float(last["rsi"])
+    z_val = float(last["z_dist"])
+    if rsi_val < 35 and z_val < -1.5:
+        emit(
+            "OVERSOLD_OPP",
+            "buy",
+            f"超卖机会：RSI={rsi_val:.1f}（超卖区间），价格偏离均线={z_val:.2f}σ（严重低估）。"
+            f"长线买入机会区间，建议分批布局。",
+        )
+
+    # 3. Event Shock (Keep original logic but integrate)
     vol_z = last["vol_z"]
     rv_last = last["rv"]
     rv_mean10 = feat["rv"].tail(10).mean()
     if vol_z >= cfg.volume_z_hi and rv_last > rv_mean10:
-        emit("EVENT_SHOCK", "high", f"Volume & Volatility Shock detected (vol_z={vol_z:.2f}). Market regime shift likely.")
+        emit("EVENT_SHOCK", "high", f"成交量与波动率异常放大 (vol_z={vol_z:.2f})，市场可能发生结构性变化，注意风险。")
 
     return alerts
 

@@ -16,6 +16,7 @@ dependencies = [
   "pandas>=2.0.0",
   "streamlit>=1.40.0",
   "PyYAML>=6.0.0",
+  "httpx>=0.28.1",
 ]
 
 [project.optional-dependencies]
@@ -31,4 +32,9 @@ testpaths = ["tests"]
 [tool.setuptools.packages.find]
 where = ["."]
 include = ["app*", "jobs*", "alerts*", "scripts*"]
+
+[dependency-groups]
+dev = [
+  "pytest>=8.0.0",
+]
 

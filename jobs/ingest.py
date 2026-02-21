@@ -48,6 +48,9 @@ def load_config(path: str = "config.yaml") -> WatchtowerConfig:
 
 def df_to_rows(ticker: str, df: pd.DataFrame) -> Iterable[PriceRow]:
     for ts, row in df.iterrows():
+        # 跳过周末（yfinance 对港股偶尔会返回周六时间戳）
+        if ts.weekday() >= 5:
+            continue
         yield PriceRow(
             ticker=ticker,
             ts=ts.to_pydatetime().replace(tzinfo=timezone.utc).isoformat(),
