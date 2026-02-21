@@ -27,7 +27,7 @@ _MINIMAX_MODEL = "MiniMax-Text-01"
 class AINarrativeAnalyst:
     """
     Translates quantitative risks into human-readable narratives.
-    Priority: MiniMax API → Claude CLI (claude -p) → Anthropic API → rule-based fallback.
+    Priority: Claude CLI (claude -p) → MiniMax API → Anthropic API → rule-based fallback.
     """
 
     def __init__(self, api_key: str = None):
@@ -65,11 +65,13 @@ class AINarrativeAnalyst:
             price=price,
         )
 
+        if self._claude_cli:
+            result = self._try_claude_cli(prompt)
+            if result:
+                return result
+
         if self.minimax_key:
             return self._call_minimax(prompt, symbol, score, rsi, z)
-
-        if self._claude_cli:
-            return self._call_claude_cli(prompt, symbol, score, rsi, z)
 
         if self.anthropic_key:
             return self._call_anthropic(prompt, symbol, score, rsi, z)
@@ -97,7 +99,8 @@ class AINarrativeAnalyst:
             print(f"[analyst] MiniMax API error: {e}, falling back to rule engine")
             return self._fallback_rule_engine(symbol, score, rsi, z)
 
-    def _call_claude_cli(self, prompt: str, symbol: str, score: float, rsi: float, z: float) -> str:
+    def _try_claude_cli(self, prompt: str) -> str | None:
+        """尝试调用 claude -p，成功返回结果，失败返回 None 让调用方降级。"""
         try:
             r = subprocess.run(
                 [self._claude_cli, "-p", prompt],
@@ -107,11 +110,11 @@ class AINarrativeAnalyst:
             )
             if r.returncode == 0 and r.stdout.strip():
                 return r.stdout.strip()
-            print(f"[analyst] claude CLI error: {r.stderr.strip()}, falling back")
-            return self._fallback_rule_engine(symbol, score, rsi, z)
+            print(f"[analyst] claude CLI failed (rc={r.returncode}), trying next engine")
+            return None
         except Exception as e:
-            print(f"[analyst] claude CLI exception: {e}, falling back")
-            return self._fallback_rule_engine(symbol, score, rsi, z)
+            print(f"[analyst] claude CLI exception: {e}, trying next engine")
+            return None
 
     def _call_anthropic(self, prompt: str, symbol: str, score: float, rsi: float, z: float) -> str:
         try:
