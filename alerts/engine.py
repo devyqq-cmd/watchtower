@@ -6,13 +6,22 @@ from dataclasses import asdict
 from datetime import datetime, timezone
 from typing import List, Dict, Any
 
+import sys
+from pathlib import Path
+
 import numpy as np
 import pandas as pd
 
 from .rules import AlertConfig
 
+# Ensure root is in path for ai.analyst
+root_path = Path(__file__).parent.parent.absolute()
+if str(root_path) not in sys.path:
+    sys.path.insert(0, str(root_path))
+from ai.analyst import AINarrativeAnalyst
 
 STATE_PATH = "data/alert_state.json"
+ai_analyst = AINarrativeAnalyst()
 
 
 def _ensure_data_dir() -> None:
@@ -51,104 +60,177 @@ def _should_emit(symbol: str, rule_id: str, ts_iso: str, cooldown_hours: int) ->
     return True
 
 
-def compute_features(df: pd.DataFrame) -> pd.DataFrame:
+def compute_features(df: pd.DataFrame, cfg: AlertConfig) -> pd.DataFrame:
     """
-    df columns required: ts, open, high, low, close, volume
+    Enhanced feature engineering for long-term risk assessment.
     """
     out = df.copy()
     out["ret"] = out["close"].pct_change()
-    # realized vol proxy: rolling std of returns
+    
+    # 1. Trend: EMAs
+    out["ema_fast"] = out["close"].ewm(span=cfg.ema_fast, adjust=False).mean()
+    out["ema_slow"] = out["close"].ewm(span=cfg.ema_slow, adjust=False).mean()
+    
+    # 2. Momentum: RSI (Manual Implementation to avoid pandas-ta dependency)
+    delta = out["close"].diff()
+    gain = (delta.where(delta > 0, 0)).rolling(window=cfg.rsi_period).mean()
+    loss = (-delta.where(delta < 0, 0)).rolling(window=cfg.rsi_period).mean()
+    rs = gain / loss.replace(0, np.nan)
+    out["rsi"] = 100 - (100 / (1 + rs))
+    
+    # 3. Overextension: Distance from EMA_slow
+    out["dist_ema"] = (out["close"] - out["ema_slow"]) / out["ema_slow"]
+    mu = out["dist_ema"].rolling(cfg.z_score_lookback).mean()
+    sd = out["dist_ema"].rolling(cfg.z_score_lookback).std()
+    out["z_dist"] = (out["dist_ema"] - mu) / sd
+    
+    # 4. Volatility: ATR
+    high_low = out["high"] - out["low"]
+    high_close = (out["high"] - out["close"].shift()).abs()
+    low_close = (out["low"] - out["close"].shift()).abs()
+    ranges = pd.concat([high_low, high_close, low_close], axis=1)
+    true_range = ranges.max(axis=1)
+    out["atr"] = true_range.rolling(14).mean()
     out["rv"] = out["ret"].rolling(20).std()
-    # volume zscore
-    mu = out["volume"].rolling(50).mean()
-    sd = out["volume"].rolling(50).std(ddof=0).replace(0, np.nan)
-    out["vol_z"] = (out["volume"] - mu) / sd
+    
+    # 5. Volume Z-Score
+    mu_vol = out["volume"].rolling(50).mean()
+    sd_vol = out["volume"].rolling(50).std(ddof=0).replace(0, np.nan)
+    out["vol_z"] = (out["volume"] - mu_vol) / sd_vol
+    
     return out
 
 
-def evaluate_alerts(symbol: str, df: pd.DataFrame, cfg: AlertConfig) -> List[Dict[str, Any]]:
+def calculate_risk_score(last: pd.Series, cfg: AlertConfig, global_vix: float = 20.0, valuation: dict = None) -> float:
     """
-    Returns a list of alert dicts:
-      {symbol, severity, rule_id, ts, msg, context}
+    Aggregates factors into a 0-100 Risk Score, influenced by VIX and Valuation.
     """
+    valuation = valuation or {}
+    pe = float(valuation.get("trailingPE", 25.0)) # Default mid-range
+    div_yield = float(valuation.get("dividendYield", 0.0))
+    
+    # 1. Trend Factor (0 to 100)
+    if last["close"] > last["ema_slow"] and last["ema_fast"] > last["ema_slow"]:
+        s_trend = 0
+    elif last["close"] < last["ema_slow"] and last["ema_fast"] < last["ema_slow"]:
+        s_trend = 100
+    else:
+        s_trend = 50
+        
+    # 2. Overextension (Z-score based)
+    z = last["z_dist"]
+    if z > 2.0:
+        s_ext = 100
+    elif z > 1.0:
+        s_ext = 70
+    elif z < -2.0:
+        s_ext = 80 
+    else:
+        s_ext = 20
+        
+    # 3. Momentum (RSI)
+    rsi = last["rsi"]
+    if rsi > 80: s_mom = 100
+    elif rsi > 70: s_mom = 80
+    elif rsi < 30: s_mom = 70 
+    else: s_mom = 20
+    
+    # 4. Volatility (ATR Percentile)
+    s_vol = 100 if last["vol_z"] > 2.0 else 20
+
+    # 5. --- FUNDAMENTAL VALUATION FACTOR (Long-term Anchor) ---
+    # High PE -> High Risk (Greed); Low PE or High Div -> Low Risk (Value)
+    if pe > cfg.pe_high_threshold:
+        s_val = 100 # Very expensive
+    elif pe < cfg.pe_low_threshold:
+        s_val = 10 # Strong value
+    elif div_yield > cfg.div_yield_min:
+        s_val = 20 # Safe yield
+    else:
+        s_val = 50 # Fairly valued
+    
+    # --- VIX INFLUENCE ---
+    vix_modifier = 0
+    if global_vix < cfg.vix_complacency_threshold and (s_ext > 50 or s_mom > 50):
+        vix_modifier += 15
+    if global_vix > cfg.vix_panic_threshold:
+        vix_modifier -= 10
+
+    # Weighted Sum
+    score = (
+        s_trend * cfg.weights["trend"] +
+        s_ext * cfg.weights["overextension"] +
+        s_mom * cfg.weights["momentum"] +
+        s_vol * cfg.weights["volatility"] +
+        s_val * cfg.weights["valuation"]
+    ) + vix_modifier
+    return float(np.clip(score, 0, 100))
+
+
+def evaluate_alerts(symbol: str, df: pd.DataFrame, cfg: AlertConfig, global_vix: float = 20.0, valuation: dict = None) -> List[Dict[str, Any]]:
     if df is None or df.empty or len(df) < cfg.min_bars:
         return []
 
     df = df.sort_values("ts").reset_index(drop=True)
-    feat = compute_features(df)
+    feat = compute_features(df, cfg)
     last = feat.iloc[-1]
 
     ts_iso = pd.to_datetime(last["ts"], utc=True).to_pydatetime().isoformat()
-    ret = float(last.get("ret", np.nan)) if pd.notna(last.get("ret")) else 0.0
-    vol_z = float(last.get("vol_z", np.nan)) if pd.notna(last.get("vol_z")) else np.nan
-
-    # vol percentile based on rv history (needs enough)
-    rv = feat["rv"].dropna()
-    vol_pct = float(rv.rank(pct=True).iloc[-1]) if len(rv) >= 30 else 0.0
-
-    # rv "warming up" proxy: compare last rv vs 10-bar mean
-    rv_last = float(rv.iloc[-1]) if len(rv) else np.nan
-    rv_mean10 = float(rv.tail(10).mean()) if len(rv) >= 10 else np.nan
-    rv_warming = (np.isfinite(rv_last) and np.isfinite(rv_mean10) and rv_last > rv_mean10)
-
+    risk_score = calculate_risk_score(last, cfg, global_vix=global_vix, valuation=valuation)
+    
+    pe_str = f"P/E: {valuation.get('trailingPE', 'N/A')}" if valuation else ""
+    print(f"[DEBUG] Symbol: {symbol}, Risk Score: {risk_score:.1f}/100, RSI: {last['rsi']:.1f}, Z-Dist: {last['z_dist']:.2f}, {pe_str}, Global VIX: {global_vix:.1f}")
+    
     alerts: List[Dict[str, Any]] = []
 
-    def emit(rule_id: str, severity: str, msg: str) -> None:
+    def emit(rule_id: str, severity: str, msg: str, context: dict = None) -> None:
         if _should_emit(symbol, rule_id, ts_iso, cfg.cooldown_hours):
+            ctx = context or {}
+            ctx.update({
+                "risk_score": risk_score,
+                "rsi": last["rsi"],
+                "z_dist": last["z_dist"],
+                "price": last["close"]
+            })
+            # Generate AI Narrative based on risk_data
+            ai_advice = ai_analyst.analyze_risk_context(symbol, ctx)
+            full_msg = f"{msg}\nAI ADVICE: {ai_advice}"
+            
             alerts.append({
                 "symbol": symbol,
                 "severity": severity,
                 "rule_id": rule_id,
                 "ts": ts_iso,
-                "msg": msg,
-                "context": {
-                    "ret": ret,
-                    "vol_z": None if not np.isfinite(vol_z) else vol_z,
-                    "vol_pct": vol_pct,
-                    "rv_last": None if not np.isfinite(rv_last) else rv_last,
-                }
+                "msg": full_msg,
+                "context": ctx
             })
 
-    # 1) Event Shock (少但关键)：高波分位 + 放量 + 波动升温
-    if (vol_pct >= cfg.vol_percentile_hi
-        and np.isfinite(vol_z) and vol_z >= cfg.volume_z_hi
-        and rv_warming):
-        emit(
-            "EVENT_SHOCK",
-            "high",
-            f"Event shock: vol_pct={vol_pct:.2f}, vol_z={vol_z:.2f}, ret={ret:+.2%}"
-        )
+    # 1. CORE: Risk Scoring Alerts (Discipline)
+    if risk_score >= 80:
+        emit("RISK_EXTREME", "high", f"EXTREME RISK ({risk_score:.0f}/100): Extreme Greed or Structural Breakdown. ACTION: STRICT PROFIT TAKING / DE-LEVERAGE.")
+    elif risk_score >= 60:
+        emit("RISK_HIGH", "med", f"High Risk ({risk_score:.0f}/100): Overextended Upwards or Extreme Panic.")
+    elif risk_score <= 20:
+        # emit("RISK_LOW", "info", f"Low Risk ({risk_score:.0f}/100): Bullish Trend & Healthy Consolidation.")
+        pass
 
-    # 2) Structural Break：突破/破位 + 放量确认
-    lb = cfg.breakout_lookback
-    if len(feat) >= lb:
-        window = feat.tail(lb)
-        hi = float(window["high"].max())
-        lo = float(window["low"].min())
-        close = float(last["close"])
-
-        if close >= hi and np.isfinite(vol_z) and vol_z >= cfg.breakout_volume_z:
-            emit(
-                "BREAKOUT_UP",
-                "med",
-                f"Breakout up: close>=hi({lb}) vol_z={vol_z:.2f}, ret={ret:+.2%}"
-            )
-        if close <= lo and np.isfinite(vol_z) and vol_z >= cfg.breakout_volume_z:
-            emit(
-                "BREAKDOWN_DOWN",
-                "med",
-                f"Breakdown down: close<=lo({lb}) vol_z={vol_z:.2f}, ret={ret:+.2%}"
-            )
-
-    # 3) Tail Risk：大涨跌 + 波动升温（过滤噪声）
-    if (vol_pct >= cfg.vol_percentile_hi) and (ret >= cfg.tail_ret_hi or ret <= cfg.tail_ret_lo):
-        emit(
-            "TAIL_RISK",
-            "high",
-            f"Tail risk: ret={ret:+.2%}, vol_pct={vol_pct:.2f}, vol_z={vol_z:.2f}"
-        )
+    # 2. Event Shock (Keep original logic but integrate)
+    vol_z = last["vol_z"]
+    rv_last = last["rv"]
+    rv_mean10 = feat["rv"].tail(10).mean()
+    if vol_z >= cfg.volume_z_hi and rv_last > rv_mean10:
+        emit("EVENT_SHOCK", "high", f"Volume & Volatility Shock detected (vol_z={vol_z:.2f}). Market regime shift likely.")
 
     return alerts
+
+
+def append_alerts_jsonl(alerts: List[Dict[str, Any]], path: str = "data/alerts.jsonl") -> None:
+    if not alerts:
+        return
+    _ensure_data_dir()
+    with open(path, "a", encoding="utf-8") as f:
+        for a in alerts:
+            f.write(json.dumps(a, ensure_ascii=False) + "\n")
 
 
 def append_alerts_jsonl(alerts: List[Dict[str, Any]], path: str = "data/alerts.jsonl") -> None:
