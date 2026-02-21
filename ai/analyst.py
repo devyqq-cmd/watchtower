@@ -1,5 +1,6 @@
 from __future__ import annotations
 import os
+import subprocess
 from typing import Dict, Any
 
 import httpx
@@ -26,13 +27,25 @@ _MINIMAX_MODEL = "MiniMax-Text-01"
 class AINarrativeAnalyst:
     """
     Translates quantitative risks into human-readable narratives.
-    Priority: MiniMax API → Anthropic API → rule-based fallback.
+    Priority: MiniMax API → Claude CLI (claude -p) → Anthropic API → rule-based fallback.
     """
 
     def __init__(self, api_key: str = None):
         # api_key param kept for backward compat but not used
         self.minimax_key = os.getenv("MINIMAX_API_KEY", "").strip()
         self.anthropic_key = os.getenv("ANTHROPIC_API_KEY", "").strip()
+        self._claude_cli = self._detect_claude_cli()
+
+    def _detect_claude_cli(self) -> str | None:
+        """Return path to claude CLI if available, else None."""
+        for candidate in ["claude", os.path.expanduser("~/.claude/local/claude")]:
+            try:
+                r = subprocess.run([candidate, "--version"], capture_output=True, timeout=5)
+                if r.returncode == 0:
+                    return candidate
+            except Exception:
+                pass
+        return None
 
     def analyze_risk_context(self, symbol: str, risk_data: Dict[str, Any], news_context: str = "") -> str:
         score = risk_data.get("risk_score", 0)
@@ -54,6 +67,9 @@ class AINarrativeAnalyst:
 
         if self.minimax_key:
             return self._call_minimax(prompt, symbol, score, rsi, z)
+
+        if self._claude_cli:
+            return self._call_claude_cli(prompt, symbol, score, rsi, z)
 
         if self.anthropic_key:
             return self._call_anthropic(prompt, symbol, score, rsi, z)
@@ -79,6 +95,22 @@ class AINarrativeAnalyst:
             return resp.json()["choices"][0]["message"]["content"].strip()
         except Exception as e:
             print(f"[analyst] MiniMax API error: {e}, falling back to rule engine")
+            return self._fallback_rule_engine(symbol, score, rsi, z)
+
+    def _call_claude_cli(self, prompt: str, symbol: str, score: float, rsi: float, z: float) -> str:
+        try:
+            r = subprocess.run(
+                [self._claude_cli, "-p", prompt],
+                capture_output=True,
+                text=True,
+                timeout=60,
+            )
+            if r.returncode == 0 and r.stdout.strip():
+                return r.stdout.strip()
+            print(f"[analyst] claude CLI error: {r.stderr.strip()}, falling back")
+            return self._fallback_rule_engine(symbol, score, rsi, z)
+        except Exception as e:
+            print(f"[analyst] claude CLI exception: {e}, falling back")
             return self._fallback_rule_engine(symbol, score, rsi, z)
 
     def _call_anthropic(self, prompt: str, symbol: str, score: float, rsi: float, z: float) -> str:

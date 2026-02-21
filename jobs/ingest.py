@@ -248,6 +248,7 @@ def fetch_fundamental_valuation(ticker_str: str) -> dict:
 
 
 def run_ingest() -> None:
+
     cfg = load_config()
     store = SQLiteStore(db_path=cfg.db_path)
     store.init_db()
