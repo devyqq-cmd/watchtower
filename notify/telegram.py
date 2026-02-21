@@ -52,9 +52,9 @@ def send_alert(alert: Dict[str, Any]) -> bool:
     try:
         with httpx.Client(timeout=10) as client:
             resp = client.post(url, json={"chat_id": chat_id, "text": text})
-            if resp.status_code == 200:
+            if resp.status_code == 200 and resp.json().get("ok"):
                 return True
-            print(f"[telegram] 发送失败 HTTP {resp.status_code}: {resp.text[:200]}")
+            print(f"[telegram] 发送失败 HTTP {resp.status_code}: {resp.text[:300]}")
             return False
     except Exception as e:
         print(f"[telegram] 发送异常: {e}")
