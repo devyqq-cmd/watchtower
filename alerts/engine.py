@@ -217,6 +217,8 @@ def evaluate_alerts(symbol: str, df: pd.DataFrame, cfg: AlertConfig, global_vix:
                 "z_dist": last["z_dist"],
                 "price": last["close"]
             })
+            ctx["rule_id"] = rule_id
+            ctx["severity"] = severity
             # Generate AI Narrative based on risk_data
             ai_advice = ai_analyst.analyze_risk_context(symbol, ctx)
             full_msg = f"{msg}\nAI ADVICE: {ai_advice}"

@@ -303,8 +303,10 @@ def run_ingest() -> None:
         alerts = evaluate_alerts(ticker, df_alert, cfg_alert, global_vix=global_vix, valuation=valuation)
         append_alerts_jsonl(alerts)
         if alerts:
+            from notify.telegram import send_alert
             for a in alerts:
                 print(f"[ALERT] {a['severity']} {a['symbol']} {a['rule_id']} {a['ts']} - {a['msg']}")
+                send_alert(a)
         
         time.sleep(2)
 

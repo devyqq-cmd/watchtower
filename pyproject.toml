@@ -16,7 +16,8 @@ dependencies = [
   "pandas>=2.0.0",
   "streamlit>=1.40.0",
   "PyYAML>=6.0.0",
-  "httpx>=0.28.1",
+  "httpx[socks]>=0.28.1",
+  "anthropic>=0.40.0",
 ]
 
 [project.optional-dependencies]
