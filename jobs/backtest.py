@@ -34,6 +34,9 @@ class BacktestConfig:
     # 评分阈值（可调，是参数扫描的核心维度）
     score_sell_hard: float = 80.0   # 超过此分 → 大幅减仓至 pos_high_risk
     score_sell_soft: float = 65.0   # 超过此分 → 适度减仓至 pos_mid_risk
+    # 熊市保护：死叉（EMA50 < EMA200）+ 价格跌破 EMA200 时强制降仓
+    use_bear_protection: bool = True
+    pos_bear_market: float = 0.3    # 熊市期间最高仓位上限
     alert_cfg: Optional[AlertConfig] = None
 
     def __post_init__(self):
@@ -77,8 +80,17 @@ class BacktestEngine:
         )
         return feat
 
-    def _signals_to_positions(self, risk_scores: pd.Series) -> pd.Series:
-        """将风险评分序列转换为目标仓位序列。"""
+    def _bear_market_signal(self, feat: pd.DataFrame) -> pd.Series:
+        """死叉 + 价格跌破 EMA200 → 熊市信号。
+        条件：close < ema_slow AND ema_fast < ema_slow。
+        """
+        return (feat["close"] < feat["ema_slow"]) & (feat["ema_fast"] < feat["ema_slow"])
+
+    def _signals_to_positions(self, risk_scores: pd.Series, bear_market: pd.Series) -> pd.Series:
+        """将风险评分 + 熊市信号转换为目标仓位序列。
+        熊市信号优先级最高：触发时仓位上限 = pos_bear_market，
+        覆盖风险评分系统（但不会比风险评分要求的更高）。
+        """
         hard = self.cfg.score_sell_hard
         soft = self.cfg.score_sell_soft
         pos = pd.Series(self.cfg.pos_low_risk, index=risk_scores.index)
@@ -86,6 +98,9 @@ class BacktestEngine:
         pos[(risk_scores >= soft) & (risk_scores < hard)] = self.cfg.pos_mid_risk
         # 信号不足时（NaN）持默认满仓
         pos[risk_scores.isna()] = self.cfg.pos_low_risk
+        # 熊市保护：强制将仓位压缩到 pos_bear_market 上限
+        if self.cfg.use_bear_protection:
+            pos[bear_market] = pos[bear_market].clip(upper=self.cfg.pos_bear_market)
         return pos
 
     def run(self) -> pd.DataFrame:
@@ -93,12 +108,13 @@ class BacktestEngine:
         运行回测，返回逐 bar 结果。
 
         Returns DataFrame with columns:
-            ts, price, risk_score, position, strat_return, bench_return
+            ts, price, risk_score, bear_market, position, strat_return, bench_return
         """
         feat = self._compute_signals()
+        bear_market = self._bear_market_signal(feat)
 
         # 目标仓位（t 时刻信号）
-        target_pos = self._signals_to_positions(feat["risk_score"])
+        target_pos = self._signals_to_positions(feat["risk_score"], bear_market)
 
         # 实际仓位滞后一期（t+1 才能按 t 的信号建仓）
         actual_pos = target_pos.shift(1).fillna(self.cfg.pos_low_risk)
@@ -117,6 +133,7 @@ class BacktestEngine:
             "ts": feat["ts"],
             "price": feat["close"],
             "risk_score": feat["risk_score"],
+            "bear_market": bear_market,
             "position": actual_pos,
             "strat_return": strat_ret,
             "bench_return": bench_ret,
