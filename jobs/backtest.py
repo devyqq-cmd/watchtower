@@ -1,123 +1,233 @@
+# jobs/backtest.py
 from __future__ import annotations
+
 import sys
 from pathlib import Path
 
-# Add project root to sys.path
 root_path = Path(__file__).parent.parent.absolute()
 if str(root_path) not in sys.path:
     sys.path.insert(0, str(root_path))
 
-import json
 import os
-from datetime import datetime, timedelta, timezone
-import pandas as pd
-import numpy as np
+from dataclasses import dataclass, field
+from typing import Optional
 
-from alerts import AlertConfig, evaluate_alerts, compute_features, calculate_risk_score
+import numpy as np
+import pandas as pd
+
+from alerts.engine import compute_features, calculate_risk_score
+from alerts.rules import AlertConfig
+from app.providers.analytics.performance import summarize
 from app.providers.store.sqlite_store import SQLiteStore
 
-def run_backtest(symbol: str, days_back: int = 30):
-    print(f"--- [Backtest Engine] Starting Simulation for {symbol} ---")
-    store = SQLiteStore(db_path="watchtower.db")
-    
-    # 1. Fetch full history for indicators
+
+@dataclass
+class BacktestConfig:
+    """回测参数配置。"""
+    cost_bps: float = 10.0          # 单边交易成本，基点（10bps = 0.1%）
+    vix: float = 20.0               # 固定 VIX（基础回测用，Walk-Forward 中可替换）
+    valuation: dict = field(default_factory=lambda: {"trailingPE": 25.0})
+    # 仓位映射：risk_score -> position_fraction
+    pos_high_risk: float = 0.2      # score >= 80
+    pos_mid_risk: float = 0.5       # score >= 65
+    pos_low_risk: float = 1.0       # score <= 35
+    alert_cfg: Optional[AlertConfig] = None
+
+    def __post_init__(self):
+        if self.alert_cfg is None:
+            self.alert_cfg = AlertConfig()
+
+
+class BacktestEngine:
+    """
+    向量化回测引擎。
+
+    设计原则：
+    1. 特征一次性计算（rolling window 是 causal 的，无前视偏差）
+    2. 信号在 t 时刻生成，仓位在 t+1 时刻才生效（position_next）
+    3. 交易成本按仓位变化量计算
+    """
+
+    def __init__(self, df: pd.DataFrame, cfg: BacktestConfig):
+        """
+        Args:
+            df: OHLCV DataFrame，必须包含 [ts, open, high, low, close, volume]
+                ts 必须是 UTC-aware datetime
+            cfg: 回测配置
+        """
+        self.df = df.copy().sort_values("ts").reset_index(drop=True)
+        self.cfg = cfg
+        self._min_bars = cfg.alert_cfg.min_bars  # type: ignore
+
+    def _compute_signals(self) -> pd.DataFrame:
+        """计算全量特征和风险评分，返回带 risk_score 列的 DataFrame。"""
+        feat = compute_features(self.df, self.cfg.alert_cfg)  # type: ignore
+        feat["risk_score"] = feat.apply(
+            lambda row: calculate_risk_score(
+                row, self.cfg.alert_cfg,  # type: ignore
+                global_vix=self.cfg.vix,
+                valuation=self.cfg.valuation,
+            )
+            if not pd.isna(row["rsi"])
+            else np.nan,
+            axis=1,
+        )
+        return feat
+
+    def _signals_to_positions(self, risk_scores: pd.Series) -> pd.Series:
+        """将风险评分序列转换为目标仓位序列。"""
+        pos = pd.Series(self.cfg.pos_low_risk, index=risk_scores.index)
+        pos[risk_scores >= 80] = self.cfg.pos_high_risk
+        pos[(risk_scores >= 65) & (risk_scores < 80)] = self.cfg.pos_mid_risk
+        pos[risk_scores <= 35] = self.cfg.pos_low_risk
+        # 信号不足时（NaN）持默认仓位
+        pos[risk_scores.isna()] = self.cfg.pos_low_risk
+        return pos
+
+    def run(self) -> pd.DataFrame:
+        """
+        运行回测，返回逐 bar 结果。
+
+        Returns DataFrame with columns:
+            ts, price, risk_score, position, strat_return, bench_return
+        """
+        feat = self._compute_signals()
+
+        # 目标仓位（t 时刻信号）
+        target_pos = self._signals_to_positions(feat["risk_score"])
+
+        # 实际仓位滞后一期（t+1 才能按 t 的信号建仓）
+        actual_pos = target_pos.shift(1).fillna(self.cfg.pos_low_risk)
+
+        # 每日收益
+        bench_ret = feat["close"].pct_change().fillna(0.0)
+
+        # 交易成本：仓位变化量 * cost_bps / 10000
+        pos_change = actual_pos.diff().abs().fillna(0.0)
+        cost = pos_change * (self.cfg.cost_bps / 10_000)
+
+        # 策略收益
+        strat_ret = actual_pos * bench_ret - cost
+
+        result = pd.DataFrame({
+            "ts": feat["ts"],
+            "price": feat["close"],
+            "risk_score": feat["risk_score"],
+            "position": actual_pos,
+            "strat_return": strat_ret,
+            "bench_return": bench_ret,
+        })
+
+        # 只保留有足够历史的 bar（前 min_bars 根不可靠）
+        result = result.iloc[self._min_bars:].reset_index(drop=True)
+        result.iloc[0, result.columns.get_loc("strat_return")] = 0.0
+        result.iloc[0, result.columns.get_loc("bench_return")] = 0.0
+
+        return result
+
+    def run_split(self, is_ratio: float = 0.75) -> dict:
+        """
+        IS/OOS 分割回测。
+
+        Args:
+            is_ratio: 样本内占比（默认 75%，剩余 25% 为样本外）
+
+        Returns:
+            {
+                "is_metrics": {...},   # 样本内绩效
+                "oos_metrics": {...},  # 样本外绩效（真实表现）
+                "full_result": DataFrame,
+            }
+        """
+        result = self.run()
+        split_idx = int(len(result) * is_ratio)
+
+        is_df = result.iloc[:split_idx]
+        oos_df = result.iloc[split_idx:]
+
+        is_metrics = summarize(
+            is_df["strat_return"], is_df["bench_return"], label="IS"
+        )
+        oos_metrics = summarize(
+            oos_df["strat_return"], oos_df["bench_return"], label="OOS"
+        )
+
+        return {
+            "is_metrics": is_metrics,
+            "oos_metrics": oos_metrics,
+            "full_result": result,
+        }
+
+    def save_results(self, result: pd.DataFrame, path: str = "data/backtest_results.csv") -> None:
+        os.makedirs("data", exist_ok=True)
+        result.to_csv(path, index=False)
+        print(f"[backtest] Results saved to {path}")
+
+
+def run_backtest(symbol: str, db_path: str = "watchtower.db", is_ratio: float = 0.75) -> dict:
+    """
+    CLI 入口：从 SQLite 读取完整历史，运行 IS/OOS 回测并打印报告。
+    """
+    store = SQLiteStore(db_path=db_path)
     with store._connect() as conn:
         df = pd.read_sql(
             "SELECT ts, open, high, low, close, volume FROM prices WHERE ticker = ? ORDER BY ts ASC",
             conn, params=(symbol,)
         )
-    
-    if df.empty or len(df) < 150:
-        print(f"Not enough historical data for {symbol} (Found {len(df)} bars).")
-        return
+
+    if df.empty or len(df) < 300:
+        print(f"[backtest] 数据不足（{len(df)} 根 bar），需要至少 300 根。请先运行 ingest。")
+        return {}
 
     df["ts"] = pd.to_datetime(df["ts"], utc=True)
-    df = df.sort_values("ts").reset_index(drop=True)
-    
-    # Start simulation from N days ago
-    now = datetime.now(timezone.utc)
-    sim_start_date = now - timedelta(days=days_back)
-    
-    results = []
-    equity_hold = 1.0  # Buy and Hold Benchmark
-    equity_strat = 1.0 # Strategy Equity
-    position = 1.0     # 1.0 = Full Long, 0.5 = Half, etc.
-    
-    current_cfg = AlertConfig.load_evolution()
-    
-    # Simulation Loop: Day by Day
-    sim_dates = df[df["ts"] >= sim_start_date]["ts"].unique()
-    
-    print(f"Simulating {len(sim_dates)} days...")
-    
-    for i, sim_date in enumerate(sim_dates):
-        # Only look at data available up to sim_date
-        df_slice = df[df["ts"] <= sim_date].copy()
-        if len(df_slice) < 100: continue
-        
-        # Calculate features and risk score at THAT MOMENT
-        feat = compute_features(df_slice, current_cfg)
-        last = feat.iloc[-1]
-        
-        # (Simplified: assume constant VIX/Valuation for backtest demo)
-        risk_score = calculate_risk_score(last, current_cfg, global_vix=20.0, valuation={"trailingPE": 25.0})
-        
-        # Strategy Logic: Discipline Enforcement
-        # Reduce position on high risk, increase on low risk
-        prev_pos = position
-        if risk_score >= 80:
-            position = 0.2  # Heavy Sell-off
-        elif risk_score >= 65:
-            position = 0.5  # Partial Profit taking
-        elif risk_score <= 35:
-            position = 1.0  # Buy back / Re-entry
-            
-        # Update Equity Curves based on the NEXT day's return
-        if i < len(sim_dates) - 1:
-            next_day_ret = (df[df["ts"] == sim_dates[i+1]]["close"].values[0] / last["close"]) - 1
-            equity_hold *= (1 + next_day_ret)
-            equity_strat *= (1 + (next_day_ret * prev_pos))
-            
-        results.append({
-            "ts": sim_date.isoformat(),
-            "price": last["close"],
-            "score": risk_score,
-            "position": prev_pos,
-            "equity_hold": equity_hold,
-            "equity_strat": equity_strat
-        })
 
-    # Save to CSV for visualization
-    res_df = pd.DataFrame(results)
-    os.makedirs("data", exist_ok=True)
-    res_df.to_csv("data/backtest_results.csv", index=False)
-    
-    def calc_mdd(series):
-        rollup = series.cummax()
-        drawdown = (series - rollup) / rollup
-        return float(drawdown.min())
+    cfg = BacktestConfig(alert_cfg=AlertConfig.load_evolution())
+    engine = BacktestEngine(df, cfg)
+    report = engine.run_split(is_ratio=is_ratio)
 
-    mdd_hold = calc_mdd(res_df["equity_hold"])
-    mdd_strat = calc_mdd(res_df["equity_strat"])
-    final_ret_hold = (res_df["equity_hold"].iloc[-1] - 1)
-    final_ret_strat = (res_df["equity_strat"].iloc[-1] - 1)
+    _print_report(symbol, report)
+    engine.save_results(report["full_result"])
+    return report
 
-    print(f"\n--- [Backtest Report: {symbol}] ---")
-    print(f"Period: Last {days_back} days")
-    print(f"Final Return (Buy & Hold): {final_ret_hold:+.2%}")
-    print(f"Final Return (AI Strategy): {final_ret_strat:+.2%}")
-    print(f"Max Drawdown (Buy & Hold): {mdd_hold:.2%}")
-    print(f"Max Drawdown (AI Strategy): {mdd_strat:.2%}")
-    
-    # Return metrics for integration
-    return {
-        "mdd_hold": mdd_hold,
-        "mdd_strat": mdd_strat,
-        "ret_hold": final_ret_hold,
-        "ret_strat": final_ret_strat
-    }
+
+def _print_report(symbol: str, report: dict) -> None:
+    is_m = report["is_metrics"]
+    oos_m = report["oos_metrics"]
+
+    print(f"\n{'='*55}")
+    print(f"  回测报告: {symbol}")
+    print(f"{'='*55}")
+    print(f"{'指标':<20} {'样本内(IS)':>12} {'样本外(OOS)':>12}")
+    print(f"{'-'*55}")
+
+    def fmt(m: dict, key: str, pct: bool = False) -> str:
+        v = m.get(key, float("nan"))
+        if pct:
+            return f"{v:>+11.1%}"
+        return f"{v:>12.2f}"
+
+    rows = [
+        ("总收益", "total_return", True),
+        ("基准收益", "benchmark_return", True),
+        ("年化收益", "annual_return", True),
+        ("Sharpe", "sharpe", False),
+        ("最大回撤", "max_drawdown", True),
+        ("Calmar", "calmar", False),
+        ("t-stat (超额)", "t_stat", False),
+        ("样本数(Bar)", "n_bars", False),
+    ]
+    for label, key, pct in rows:
+        print(f"{label:<20} {fmt(is_m, key, pct)} {fmt(oos_m, key, pct)}")
+
+    print(f"{'='*55}")
+    t = oos_m.get("t_stat", 0)
+    verdict = "✓ 统计显著 (t>2)" if abs(t) >= 2.0 else "✗ 统计噪音 (t<2)，策略无效"
+    print(f"  OOS 结论: {verdict}")
+    print(f"{'='*55}\n")
+
 
 if __name__ == "__main__":
-    import sys
-    ticker = sys.argv[1] if len(sys.argv) > 1 else "0700.HK"
-    run_backtest(ticker, 60) # Test 60 days
+    import sys as _sys
+    ticker = _sys.argv[1] if len(_sys.argv) > 1 else "0700.HK"
+    db = _sys.argv[2] if len(_sys.argv) > 2 else "watchtower.db"
+    run_backtest(ticker, db_path=db)
