@@ -7,27 +7,43 @@ from scipy import stats
 
 
 def sharpe_ratio(returns: pd.Series, periods: int = 252, risk_free: float = 0.0) -> float:
-    """年化 Sharpe 比率。periods=252 为日线，52 为周线。"""
-    excess = returns - risk_free / periods
-    if excess.std() == 0:
+    """年化 Sharpe 比率。periods=252 为日线，52 为周线。risk_free 为年化无风险利率（如 0.03 = 3%）。"""
+    if len(returns) < 2:
         return 0.0
-    return float((excess.mean() / excess.std()) * np.sqrt(periods))
+    excess = returns - risk_free / periods
+    std = excess.std()
+    if std == 0 or pd.isna(std):
+        return 0.0
+    return float((excess.mean() / std) * np.sqrt(periods))
 
 
 def max_drawdown(equity: pd.Series) -> float:
-    """最大回撤，返回负数（如 -0.25 表示 -25%）。"""
+    """最大回撤，返回负数（如 -0.25 表示 -25%）。输入为净值序列（wealth index），不应含零或负值。"""
+    if len(equity) < 2:
+        return 0.0
     roll_max = equity.cummax()
+    # Guard against zero/negative equity (shouldn't happen in wealth index but be safe)
+    roll_max = roll_max.replace(0, np.nan)
     drawdown = (equity - roll_max) / roll_max
-    return float(drawdown.min())
+    mdd = drawdown.min()
+    return float(mdd) if not pd.isna(mdd) else 0.0
 
 
 def calmar_ratio(returns: pd.Series, equity: pd.Series, periods: int = 252) -> float:
-    """Calmar = 年化收益 / |最大回撤|。"""
-    annual_ret = (1 + returns.mean()) ** periods - 1
+    """Calmar = 年化收益(CAGR) / |最大回撤|。"""
+    if len(returns) < 2 or len(equity) < 2:
+        return 0.0
+    # Use geometric CAGR: (end/start)^(periods/n) - 1
+    n = len(returns)
+    start_val = equity.iloc[0]
+    end_val = equity.iloc[-1]
+    if start_val <= 0:
+        return 0.0
+    cagr = (end_val / start_val) ** (periods / n) - 1
     mdd = abs(max_drawdown(equity))
     if mdd == 0:
         return float("inf")
-    return float(annual_ret / mdd)
+    return float(cagr / mdd)
 
 
 def t_stat_alpha(returns: pd.Series) -> float:
