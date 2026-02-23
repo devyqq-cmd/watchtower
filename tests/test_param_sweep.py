@@ -15,24 +15,28 @@ def make_price_df(n=600, seed=7) -> pd.DataFrame:
 
 def test_sweep_returns_grid():
     df = make_price_df()
+    # soft=[40,50], hard=[55,65,75] → 合法组合(soft<hard): 40<55,40<65,40<75,50<55,50<65,50<75 = 6组
     cfg = SweepConfig(
-        rsi_overbought_range=[65, 70, 75],
-        z_threshold_greed_range=[1.5, 2.0, 2.5],
+        score_sell_soft_range=[40.0, 50.0],
+        score_sell_hard_range=[55.0, 65.0, 75.0],
     )
     sweeper = ParamSweeper(df, cfg)
     grid = sweeper.run()
-    assert len(grid) == 9  # 3 x 3
+    assert len(grid) == 6  # 只有 soft < hard 的组合
     assert "oos_sharpe" in grid.columns
+    assert "score_sell_soft" in grid.columns
+    assert "score_sell_hard" in grid.columns
 
 def test_sweep_saves_csv(tmp_path):
     df = make_price_df()
+    # soft=[45], hard=[60,70] → 2 组合法组合
     cfg = SweepConfig(
-        rsi_overbought_range=[70, 75],
-        z_threshold_greed_range=[2.0, 2.5],
+        score_sell_soft_range=[45.0],
+        score_sell_hard_range=[60.0, 70.0],
     )
     sweeper = ParamSweeper(df, cfg)
     grid = sweeper.run()
     out = str(tmp_path / "sweep.csv")
     sweeper.save(grid, out)
     loaded = pd.read_csv(out)
-    assert len(loaded) == 4
+    assert len(loaded) == 2

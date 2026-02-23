@@ -21,10 +21,11 @@ from jobs.backtest import BacktestConfig, BacktestEngine
 
 @dataclass
 class SweepConfig:
-    rsi_overbought_range: List[int] = field(default_factory=lambda: list(range(65, 82, 3)))
-    z_threshold_greed_range: List[float] = field(default_factory=lambda: [1.5, 2.0, 2.5, 3.0])
+    # 扫描真正影响仓位决策的评分阈值
+    score_sell_soft_range: List[float] = field(default_factory=lambda: [40.0, 45.0, 50.0, 55.0, 60.0, 65.0])
+    score_sell_hard_range: List[float] = field(default_factory=lambda: [55.0, 60.0, 65.0, 70.0, 75.0, 80.0])
     cost_bps: float = 10.0
-    is_ratio: float = 0.75  # OOS is 25%
+    is_ratio: float = 0.75  # OOS 占 25%
 
 
 class ParamSweeper:
@@ -34,28 +35,27 @@ class ParamSweeper:
 
     def run(self) -> pd.DataFrame:
         rows = []
-        combos = list(product(
-            self.cfg.rsi_overbought_range,
-            self.cfg.z_threshold_greed_range,
-        ))
+        # 只取 soft < hard 的合法组合，避免无意义参数
+        combos = [
+            (soft, hard)
+            for soft, hard in product(self.cfg.score_sell_soft_range, self.cfg.score_sell_hard_range)
+            if soft < hard
+        ]
         total = len(combos)
-        for i, (rsi_ob, z_greed) in enumerate(combos, 1):
-            print(f"  [{i}/{total}] rsi_ob={rsi_ob}, z_greed={z_greed:.1f}", end="\r")
-            alert_cfg = AlertConfig(
-                rsi_overbought=rsi_ob,
-                z_threshold_greed=z_greed,
-            )
+        for i, (soft, hard) in enumerate(combos, 1):
+            print(f"  [{i}/{total}] soft={soft:.0f}, hard={hard:.0f}", end="\r")
             bt_cfg = BacktestConfig(
                 cost_bps=self.cfg.cost_bps,
-                alert_cfg=alert_cfg,
+                score_sell_soft=soft,
+                score_sell_hard=hard,
             )
             try:
                 engine = BacktestEngine(self.df, bt_cfg)
                 report = engine.run_split(is_ratio=self.cfg.is_ratio)
                 oos = report["oos_metrics"]
                 rows.append({
-                    "rsi_overbought": rsi_ob,
-                    "z_threshold_greed": z_greed,
+                    "score_sell_soft": soft,
+                    "score_sell_hard": hard,
                     "oos_sharpe": round(oos.get("sharpe", float("nan")), 3),
                     "oos_t_stat": round(oos.get("t_stat", float("nan")), 3),
                     "oos_mdd": round(oos.get("max_drawdown", float("nan")), 4),
@@ -63,8 +63,8 @@ class ParamSweeper:
                 })
             except Exception:
                 rows.append({
-                    "rsi_overbought": rsi_ob,
-                    "z_threshold_greed": z_greed,
+                    "score_sell_soft": soft,
+                    "score_sell_hard": hard,
                     "oos_sharpe": float("nan"),
                     "oos_t_stat": float("nan"),
                     "oos_mdd": float("nan"),
@@ -81,11 +81,11 @@ class ParamSweeper:
 
     def print_heatmap(self, grid: pd.DataFrame) -> None:
         pivot = grid.pivot(
-            index="rsi_overbought",
-            columns="z_threshold_greed",
+            index="score_sell_soft",
+            columns="score_sell_hard",
             values="oos_sharpe"
         )
-        print("\nOOS Sharpe 热力图 (行=RSI超买阈值, 列=Z过热阈值):")
+        print("\nOOS Sharpe 热力图 (行=软阈值, 列=硬阈值):")
         print(pivot.to_string(float_format="{:.2f}".format))
         n_positive = (grid["oos_sharpe"] > 0).sum()
         n_total = len(grid)
@@ -117,7 +117,8 @@ if __name__ == "__main__":
     df["ts"] = pd.to_datetime(df["ts"], utc=True)
     cfg = SweepConfig()
     sweeper = ParamSweeper(df, cfg)
-    print(f"开始参数扫描: {symbol}，共 {len(cfg.rsi_overbought_range) * len(cfg.z_threshold_greed_range)} 组参数...")
+    n_combos = sum(1 for s in cfg.score_sell_soft_range for h in cfg.score_sell_hard_range if s < h)
+    print(f"开始参数扫描: {symbol}，共 {n_combos} 组有效参数组合（soft < hard）...")
     grid = sweeper.run()
     sweeper.print_heatmap(grid)
     sweeper.save(grid)

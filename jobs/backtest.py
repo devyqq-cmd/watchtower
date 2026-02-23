@@ -27,10 +27,13 @@ class BacktestConfig:
     cost_bps: float = 10.0          # 单边交易成本，基点（10bps = 0.1%）
     vix: float = 20.0               # 固定 VIX（基础回测用，Walk-Forward 中可替换）
     valuation: dict = field(default_factory=lambda: {"trailingPE": 25.0})
-    # 仓位映射：risk_score -> position_fraction
-    pos_high_risk: float = 0.2      # score >= 80
-    pos_mid_risk: float = 0.5       # score >= 65
-    pos_low_risk: float = 1.0       # score <= 35
+    # 仓位档位（触发时持有的仓位比例）
+    pos_high_risk: float = 0.2      # score >= score_sell_hard 时持仓
+    pos_mid_risk: float = 0.5       # score >= score_sell_soft 时持仓
+    pos_low_risk: float = 1.0       # score <= score_sell_soft 时持仓（默认满仓）
+    # 评分阈值（可调，是参数扫描的核心维度）
+    score_sell_hard: float = 80.0   # 超过此分 → 大幅减仓至 pos_high_risk
+    score_sell_soft: float = 65.0   # 超过此分 → 适度减仓至 pos_mid_risk
     alert_cfg: Optional[AlertConfig] = None
 
     def __post_init__(self):
@@ -76,11 +79,12 @@ class BacktestEngine:
 
     def _signals_to_positions(self, risk_scores: pd.Series) -> pd.Series:
         """将风险评分序列转换为目标仓位序列。"""
+        hard = self.cfg.score_sell_hard
+        soft = self.cfg.score_sell_soft
         pos = pd.Series(self.cfg.pos_low_risk, index=risk_scores.index)
-        pos[risk_scores >= 80] = self.cfg.pos_high_risk
-        pos[(risk_scores >= 65) & (risk_scores < 80)] = self.cfg.pos_mid_risk
-        pos[risk_scores <= 35] = self.cfg.pos_low_risk
-        # 信号不足时（NaN）持默认仓位
+        pos[risk_scores >= hard] = self.cfg.pos_high_risk
+        pos[(risk_scores >= soft) & (risk_scores < hard)] = self.cfg.pos_mid_risk
+        # 信号不足时（NaN）持默认满仓
         pos[risk_scores.isna()] = self.cfg.pos_low_risk
         return pos
 
