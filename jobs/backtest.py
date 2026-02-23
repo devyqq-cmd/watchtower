@@ -159,7 +159,8 @@ class BacktestEngine:
         }
 
     def save_results(self, result: pd.DataFrame, path: str = "data/backtest_results.csv") -> None:
-        os.makedirs("data", exist_ok=True)
+        from pathlib import Path
+        os.makedirs(Path(path).parent, exist_ok=True)
         result.to_csv(path, index=False)
         print(f"[backtest] Results saved to {path}")
 
@@ -175,13 +176,13 @@ def run_backtest(symbol: str, db_path: str = "watchtower.db", is_ratio: float = 
             conn, params=(symbol,)
         )
 
-    if df.empty or len(df) < 300:
-        print(f"[backtest] 数据不足（{len(df)} 根 bar），需要至少 300 根。请先运行 ingest。")
-        return {}
-
     df["ts"] = pd.to_datetime(df["ts"], utc=True)
 
     cfg = BacktestConfig(alert_cfg=AlertConfig.load_evolution())
+    min_required = cfg.alert_cfg.ema_slow + cfg.alert_cfg.min_bars
+    if df.empty or len(df) < min_required:
+        print(f"[backtest] 数据不足（{len(df)} 根 bar），需要至少 {min_required} 根。请先运行 ingest。")
+        return {}
     engine = BacktestEngine(df, cfg)
     report = engine.run_split(is_ratio=is_ratio)
 
