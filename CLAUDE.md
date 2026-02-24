@@ -63,11 +63,16 @@ Weekly job that reads `data/alerts.jsonl`, measures signal outcomes at 20 tradin
 
 `AINarrativeAnalyst.analyze_risk_context()` tries in priority order: claude CLI (`claude -p`) → MiniMax API (`MINIMAX_API_KEY`) → Anthropic API (`ANTHROPIC_API_KEY`) → rule-based fallback. All paths produce a ≤200-char Chinese narrative attached to alert messages.
 
+### Notifications (`notify/`)
+
+`notify/telegram.py` — `send_telegram_message()` formats and sends alert messages. Called from `jobs/ingest.py` after `evaluate_alerts()` if `TELEGRAM_BOT_TOKEN` and `TELEGRAM_CHAT_ID` are set.
+
 ### Storage & Config
 
 - **SQLite** (`watchtower.db` or `WATCHTOWER_DB_PATH`): single `prices` table via `app/providers/store/sqlite_store.py`
-- **`config.yaml`**: `tickers`, `interval`, `days`, `db_path`
+- **`config.yaml`**: `tickers`, `interval`, `days`, `db_path`; loaded via `jobs/ingest.py:load_config()`
 - **`app/providers/analytics/performance.py`**: `sharpe_ratio`, `max_drawdown`, `calmar_ratio`, `t_stat_alpha`, `summarize` — shared across backtest and walk-forward
+- **`data/`**: runtime artifacts (`alerts.jsonl`, `alert_state.json`, `evolution.json`, `yf_cache/`). Treat as generated state, not source.
 
 ### Environment Variables
 
@@ -77,3 +82,22 @@ Weekly job that reads `data/alerts.jsonl`, measures signal outcomes at 20 tradin
 | `TELEGRAM_BOT_TOKEN` + `TELEGRAM_CHAT_ID` | Push alert notifications |
 | `MINIMAX_API_KEY` | MiniMax LLM for narratives |
 | `ANTHROPIC_API_KEY` | Anthropic Claude for narratives |
+
+## Module Boundaries
+
+Keep code in the appropriate layer — don't mix concerns across boundaries:
+- Fetch/ingest logic → `jobs/`
+- Signal/scoring rules → `alerts/`
+- Persistence → `app/providers/store/`
+- Analytics (Sharpe, drawdown) → `app/providers/analytics/`
+- Notification delivery → `notify/`
+
+## Coding Conventions
+
+- 4-space indentation, `snake_case` for functions/variables, `PascalCase` for classes/dataclasses
+- Type hints on public functions and dataclasses
+- Commit style: short prefix subjects (`feat:`, `fix:`, `Feat:`, `Cleanup:`) in imperative form
+
+## Tests
+
+Test files map to subsystems: `test_alerts_p0.py`, `test_backtest_engine.py`, `test_walk_forward.py`, `test_param_sweep.py`, `test_performance.py`, `test_smoke.py`. Add tests for new alert rules, data transformations, and config/DB path behavior.
