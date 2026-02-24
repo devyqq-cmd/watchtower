@@ -1,5 +1,5 @@
-from dataclasses import dataclass, field
-from typing import Dict
+from dataclasses import dataclass, field, fields, replace
+from typing import Any, Dict
 
 @dataclass(frozen=True)
 class AlertConfig:
@@ -55,22 +55,36 @@ class AlertConfig:
         """
         import json
         import os
+        import logging
+
+        logger = logging.getLogger(__name__)
         base = cls()
         path = "data/evolution.json"
         if os.path.exists(path):
             try:
                 with open(path, "r") as f:
                     evo = json.load(f)
-                    # Override weights if present
-                    if "weights" in evo:
-                        base.weights.update(evo["weights"])
-                    # Override thresholds if present
-                    for k, v in evo.get("thresholds", {}).items():
-                        if hasattr(base, k):
-                            setattr(base, k, v)
-                    print(f"[System] 🧬 Loaded Evolved Parameters from {path}")
+                    field_names = {f.name for f in fields(cls)}
+
+                    # Merge weights into a copied dict to preserve immutability guarantees.
+                    merged_weights = dict(base.weights)
+                    raw_weights = evo.get("weights", {})
+                    if isinstance(raw_weights, dict):
+                        for k, v in raw_weights.items():
+                            if k in merged_weights and isinstance(v, (int, float)):
+                                merged_weights[k] = float(v)
+
+                    updates: Dict[str, Any] = {"weights": merged_weights}
+                    raw_thresholds = evo.get("thresholds", {})
+                    if isinstance(raw_thresholds, dict):
+                        for k, v in raw_thresholds.items():
+                            if k in field_names and k != "weights":
+                                updates[k] = v
+
+                    base = replace(base, **updates)
+                    logger.info("[System] Loaded evolved parameters from %s", path)
             except Exception as e:
-                print(f"[System] Failed to load evolution: {e}")
+                logger.warning("[System] Failed to load evolution: %s", e)
         return base
 
     # --- Engine Controls ---

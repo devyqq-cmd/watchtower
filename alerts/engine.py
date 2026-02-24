@@ -1,9 +1,8 @@
 from __future__ import annotations
 
 import json
+import logging
 import os
-from dataclasses import asdict
-from datetime import datetime, timezone
 from typing import List, Dict, Any
 
 import sys
@@ -22,6 +21,7 @@ from ai.analyst import AINarrativeAnalyst
 
 STATE_PATH = "data/alert_state.json"
 ai_analyst = AINarrativeAnalyst()
+logger = logging.getLogger(__name__)
 
 
 def _ensure_data_dir() -> None:
@@ -143,13 +143,17 @@ def calculate_risk_score(last: pd.Series, cfg: AlertConfig, global_vix: float = 
         s_trend = 50
         
     # 2. Overextension (Z-score based)
+    # Risk score semantics: higher = bigger downside/trim risk.
+    # Deeply negative z-score should reduce sell-risk, not increase it.
     z = last["z_dist"]
     if z > 2.0:
         s_ext = 100
     elif z > 1.0:
         s_ext = 70
     elif z < -2.0:
-        s_ext = 80 
+        s_ext = 10
+    elif z < -1.0:
+        s_ext = 15
     else:
         s_ext = 20
         
@@ -157,7 +161,7 @@ def calculate_risk_score(last: pd.Series, cfg: AlertConfig, global_vix: float = 
     rsi = last["rsi"]
     if rsi > 80: s_mom = 100
     elif rsi > 70: s_mom = 80
-    elif rsi < 30: s_mom = 70 
+    elif rsi < 30: s_mom = 15
     else: s_mom = 20
     
     # 4. Volatility (ATR Percentile)
@@ -204,7 +208,15 @@ def evaluate_alerts(symbol: str, df: pd.DataFrame, cfg: AlertConfig, global_vix:
     risk_score = calculate_risk_score(last, cfg, global_vix=global_vix, valuation=valuation)
     
     pe_str = f"P/E: {valuation.get('trailingPE', 'N/A')}" if valuation else ""
-    print(f"[DEBUG] Symbol: {symbol}, Risk Score: {risk_score:.1f}/100, RSI: {last['rsi']:.1f}, Z-Dist: {last['z_dist']:.2f}, {pe_str}, Global VIX: {global_vix:.1f}")
+    logger.debug(
+        "Symbol=%s RiskScore=%.1f RSI=%.1f ZDist=%.2f %s GlobalVIX=%.1f",
+        symbol,
+        risk_score,
+        last["rsi"],
+        last["z_dist"],
+        pe_str,
+        global_vix,
+    )
     
     alerts: List[Dict[str, Any]] = []
 
@@ -259,15 +271,6 @@ def evaluate_alerts(symbol: str, df: pd.DataFrame, cfg: AlertConfig, global_vix:
         emit("EVENT_SHOCK", "high", f"成交量与波动率异常放大 (vol_z={vol_z:.2f})，市场可能发生结构性变化，注意风险。")
 
     return alerts
-
-
-def append_alerts_jsonl(alerts: List[Dict[str, Any]], path: str = "data/alerts.jsonl") -> None:
-    if not alerts:
-        return
-    _ensure_data_dir()
-    with open(path, "a", encoding="utf-8") as f:
-        for a in alerts:
-            f.write(json.dumps(a, ensure_ascii=False) + "\n")
 
 
 def append_alerts_jsonl(alerts: List[Dict[str, Any]], path: str = "data/alerts.jsonl") -> None:

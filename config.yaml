@@ -1,7 +1,6 @@
 tickers:
   - "^VIX"
   - "0700.HK"
-  - "COIN"
   - "INFQ"
 
 # yfinance interval, 对应 1 小时 K 线
