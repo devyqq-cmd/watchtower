@@ -1,9 +1,11 @@
 import json
 
 import pandas as pd
+import pytest
 
 from alerts.engine import calculate_risk_score
 from alerts.rules import AlertConfig
+from jobs.review import _normalize_weights
 
 
 def test_load_evolution_applies_thresholds_and_weights(tmp_path, monkeypatch):
@@ -57,3 +59,35 @@ def test_oversold_context_does_not_inflate_sell_risk_score():
 
     assert score_oversold < 50
     assert score_overheated > score_oversold
+
+
+def test_normalize_weights_sums_to_one():
+    """进化后权重必须精确归一化为 1.0，比例关系保持不变。"""
+    # 模拟进化后的漂移权重（valuation +0.1, momentum -0.05 → 总和 1.05）
+    drifted = {
+        "trend": 0.25,
+        "overextension": 0.3,
+        "momentum": 0.10,
+        "volatility": 0.1,
+        "valuation": 0.30,
+    }
+    assert abs(sum(drifted.values()) - 1.0) > 0.01, "前提：漂移权重总和不为 1.0"
+
+    normalized = _normalize_weights(drifted)
+
+    assert abs(sum(normalized.values()) - 1.0) < 1e-9
+    # 比例关系不变：valuation 仍应大于 momentum
+    assert normalized["valuation"] > normalized["momentum"]
+    # 所有键保留
+    assert set(normalized.keys()) == set(drifted.keys())
+
+
+def test_normalize_weights_preserves_already_normalized():
+    """权重已归一化时，归一化操作应为幂等的。"""
+    weights = {"trend": 0.25, "overextension": 0.3, "momentum": 0.15, "volatility": 0.1, "valuation": 0.2}
+    assert abs(sum(weights.values()) - 1.0) < 1e-9
+
+    normalized = _normalize_weights(weights)
+
+    for k in weights:
+        assert abs(normalized[k] - weights[k]) < 1e-9

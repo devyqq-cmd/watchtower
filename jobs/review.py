@@ -13,6 +13,14 @@ DB_PATH = "watchtower.db"
 ALERTS_PATH = "data/alerts.jsonl"
 EVOLUTION_PATH = "data/evolution.json"
 
+
+def _normalize_weights(weights: dict) -> dict:
+    """将权重字典归一化，使所有值之和精确等于 1.0，比例不变。"""
+    total = sum(weights.values())
+    if total == 0:
+        return weights
+    return {k: v / total for k, v in weights.items()}
+
 def get_price_at(store: SQLiteStore, ticker: str, target_ts: datetime, window_days: int = 2) -> float | None:
     """
     Finds the closing price closest to the target timestamp.
@@ -169,6 +177,8 @@ def run_weekly_review():
         print("[进化] 卖出信号质量优秀，优化提前预警能力...")
         new_weights["trend"] = min(new_weights.get("trend", 0.25) + 0.05, 0.4)
         evolution_log.append("卖出胜率高：上调趋势权重以提前预警。")
+
+    new_weights = _normalize_weights(new_weights)
 
     # Save Evolution
     evo_data = {
