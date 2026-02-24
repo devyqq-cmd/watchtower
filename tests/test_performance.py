@@ -30,7 +30,9 @@ def test_calmar_ratio_positive():
 
 def test_t_stat_significant():
     # 持续正收益应该有高 t-stat
-    returns = pd.Series([0.002] * 100)
+    # 用微小方差（std=0.0001 << mean=0.002）避免零方差引发 scipy 精度警告
+    rng = np.random.default_rng(0)
+    returns = pd.Series(0.002 + rng.normal(0, 0.0001, 100))
     t = t_stat_alpha(returns)
     assert t > 2.0
 

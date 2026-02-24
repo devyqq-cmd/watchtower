@@ -104,7 +104,7 @@ def test_bear_market_protection_caps_position():
 
     # 仓位滞后一期：bear_market[i-1]=True 时，position[i] 不得超过 0.3
     # （第一根 bear_market 变 True 的 bar，position 仍是前一期的值，这是正确行为）
-    lagged_bear = result["bear_market"].shift(1).infer_objects(copy=False).fillna(False)
+    lagged_bear = result["bear_market"].shift(1, fill_value=False)
     after_bear_rows = result[lagged_bear == True]
     if not after_bear_rows.empty:
         assert after_bear_rows["position"].max() <= 0.3 + 1e-9, (
@@ -114,7 +114,7 @@ def test_bear_market_protection_caps_position():
     # 关闭熊市保护时仓位可以回到满仓
     cfg_no_bear = BacktestConfig(use_bear_protection=False)
     result_no_bear = BacktestEngine(df, cfg_no_bear).run()
-    lagged_bear_no = result_no_bear["bear_market"].shift(1).fillna(False)
+    lagged_bear_no = result_no_bear["bear_market"].shift(1, fill_value=False)
     after_bear_no = result_no_bear[lagged_bear_no == True]
     if not after_bear_no.empty:
         assert after_bear_no["position"].max() > 0.3, "关闭熊市保护后满仓应该可以出现"
