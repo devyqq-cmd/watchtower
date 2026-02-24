@@ -110,6 +110,7 @@ def fetch_ticker(ticker: str, interval: str, days: int) -> pd.DataFrame:
                 progress=False,
                 threads=False,     # crucial: be gentle
                 auto_adjust=False,
+                multi_level_index=False,
             )
 
             if df is None or df.empty:
@@ -190,7 +191,7 @@ def fetch_ticker_stooq_daily(ticker: str, days: int) -> pd.DataFrame:
     for sym in candidates(ticker):
         url = f"https://stooq.com/q/d/l/?s={sym}&i=d"
         try:
-            with httpx.Client(timeout=20, headers={"User-Agent": "watchtower/0.1"}) as client:
+            with httpx.Client(timeout=20, verify=False, headers={"User-Agent": "watchtower/0.1"}) as client:
                 r = client.get(url)
                 r.raise_for_status()
                 text = r.text.strip()
