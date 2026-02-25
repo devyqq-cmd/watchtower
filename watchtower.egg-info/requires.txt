@@ -1,7 +1,0 @@
-yfinance>=0.2.50
-pandas>=2.0.0
-streamlit>=1.40.0
-PyYAML>=6.0.0
-
-[dev]
-pytest>=8.0.0

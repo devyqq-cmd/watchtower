@@ -1,4 +1,0 @@
-alerts
-app
-jobs
-scripts
