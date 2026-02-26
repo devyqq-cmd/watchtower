@@ -16,6 +16,7 @@ uv run python -m jobs.backtest   # backtest (default: 0700.HK)
 uv run python -m jobs.walk_forward 0700.HK # walk-forward validation
 uv run python -m jobs.param_sweep 0700.HK  # parameter sensitivity sweep
 uv run python -m jobs.review     # weekly signal quality + weight evolution
+uv run python -m jobs.daily_review    # 手动触发每日复盘报告（港股收盘后自动由 cron 发送）
 uv run python -m pytest          # run all tests
 uv run python -m pytest tests/test_alerts_p0.py  # run single test file
 uv add <pkg>                     # add runtime dependency
