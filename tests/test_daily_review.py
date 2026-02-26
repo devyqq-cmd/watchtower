@@ -118,3 +118,102 @@ def test_generate_market_narrative_high_risk_ticker_mentioned(monkeypatch):
     }
     result = analyst.generate_market_narrative(ctx)
     assert "0700.HK" in result
+
+
+# ── Task 3: jobs/daily_review helpers ────────────────────────────────────────
+
+def test_vix_label_thresholds():
+    from jobs.daily_review import _vix_label
+    assert _vix_label(12.0) == "极度乐观"
+    assert _vix_label(17.0) == "偏乐观"
+    assert _vix_label(22.0) == "中性"
+    assert _vix_label(27.0) == "偏恐慌"
+    assert _vix_label(35.0) == "极度恐慌"
+
+
+def test_risk_emoji_thresholds():
+    from jobs.daily_review import _risk_emoji
+    assert _risk_emoji(20.0) == "🟢"
+    assert _risk_emoji(34.9) == "🟢"
+    assert _risk_emoji(35.0) == "🟡"
+    assert _risk_emoji(59.9) == "🟡"
+    assert _risk_emoji(60.0) == "🔴"
+    assert _risk_emoji(90.0) == "🔴"
+
+
+def test_ema_status_bull():
+    from jobs.daily_review import _ema_status
+    last = pd.Series({"close": 120.0, "ema_fast": 110.0, "ema_slow": 100.0})
+    assert _ema_status(last) == "多头排列"
+
+
+def test_ema_status_bear():
+    from jobs.daily_review import _ema_status
+    last = pd.Series({"close": 80.0, "ema_fast": 90.0, "ema_slow": 100.0})
+    assert _ema_status(last) == "空头排列"
+
+
+def test_ema_status_neutral():
+    from jobs.daily_review import _ema_status
+    # price above slow but fast below slow
+    last = pd.Series({"close": 105.0, "ema_fast": 95.0, "ema_slow": 100.0})
+    assert _ema_status(last) == "震荡"
+
+
+def test_get_today_alerts_empty_file(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    (tmp_path / "data").mkdir()
+    from jobs.daily_review import _get_today_alerts
+    result = _get_today_alerts("2026-02-26")
+    assert result == []
+
+
+def test_get_today_alerts_filters_by_date(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    data_dir = tmp_path / "data"
+    data_dir.mkdir()
+    alerts_file = data_dir / "alerts.jsonl"
+    # Write two alerts: one today, one yesterday
+    alerts_file.write_text(
+        json.dumps({"ts": "2026-02-26T09:00:00+00:00", "rule_id": "RISK_HIGH", "symbol": "0700.HK"}) + "\n" +
+        json.dumps({"ts": "2026-02-25T09:00:00+00:00", "rule_id": "RISK_LOW", "symbol": "INFQ"}) + "\n",
+        encoding="utf-8",
+    )
+    from jobs.daily_review import _get_today_alerts
+    result = _get_today_alerts("2026-02-26")
+    assert len(result) == 1
+    assert result[0]["rule_id"] == "RISK_HIGH"
+
+
+def test_format_report_contains_required_sections():
+    from jobs.daily_review import _format_report
+    ticker_data = [
+        {
+            "sym": "0700.HK",
+            "name": "0700.HK",
+            "today_close": 375.0,
+            "pct_change": 1.23,
+            "risk_score": 45.0,
+            "rsi": 52.3,
+            "ema_status": "多头排列",
+            "news": ["腾讯Q4净利润超预期"],
+        }
+    ]
+    report = _format_report(
+        date_str="2026-02-26",
+        weekday_str="周四",
+        vix=18.5,
+        vix_label="偏乐观",
+        ticker_data=ticker_data,
+        today_alerts=[],
+        narrative="今日市场偏乐观。",
+    )
+    assert "港股日报" in report
+    assert "VIX" in report
+    assert "0700.HK" in report
+    assert "375.00" in report
+    assert "+1.23%" in report
+    assert "45/100" in report
+    assert "今日告警" in report
+    assert "宏观解读" in report
+    assert "今日市场偏乐观" in report
