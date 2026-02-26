@@ -217,3 +217,51 @@ def test_format_report_contains_required_sections():
     assert "今日告警" in report
     assert "宏观解读" in report
     assert "今日市场偏乐观" in report
+
+
+# ── Task 4: run_daily_review orchestrator ────────────────────────────────────
+
+def test_run_daily_review_sends_report(tmp_path, monkeypatch):
+    """End-to-end smoke: run_daily_review calls send_daily_report with a non-empty string."""
+    monkeypatch.chdir(tmp_path)
+    (tmp_path / "data").mkdir()
+
+    # Minimal config
+    config_file = tmp_path / "config.yaml"
+    config_file.write_text("tickers:\n  - AAPL\ninterval: 1d\ndays: 30\ndb_path: watchtower.db\n")
+
+    # Stub fetch_ticker to return a minimal DataFrame
+    import numpy as np
+    dates = pd.date_range("2026-01-01", periods=250, freq="B", tz="UTC")
+    prices = np.linspace(100, 150, 250)
+    fake_df = pd.DataFrame({
+        "Open": prices,
+        "High": prices * 1.01,
+        "Low": prices * 0.99,
+        "Close": prices,
+        "Volume": [1_000_000.0] * 250,
+    }, index=dates)
+
+    monkeypatch.setattr("jobs.daily_review.fetch_ticker", lambda *a, **kw: fake_df)
+    monkeypatch.setattr("jobs.daily_review._fetch_news", lambda sym: ["News headline 1"])
+    monkeypatch.setattr("jobs.daily_review.load_config", lambda: __import__("jobs.ingest", fromlist=["WatchtowerConfig"]).WatchtowerConfig(
+        tickers=["AAPL"], interval="1d", days=30, db_path="watchtower.db"
+    ))
+
+    sent_reports = []
+
+    def fake_send(text: str) -> bool:
+        sent_reports.append(text)
+        return True
+
+    monkeypatch.setattr("jobs.daily_review.send_daily_report", fake_send)
+    monkeypatch.setattr("jobs.daily_review._fetch_vix", lambda: 18.5)
+
+    from jobs.daily_review import run_daily_review
+    run_daily_review()
+
+    assert len(sent_reports) == 1
+    report = sent_reports[0]
+    assert "港股日报" in report
+    assert "VIX" in report
+    assert "AAPL" in report
