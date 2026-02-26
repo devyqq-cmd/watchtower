@@ -59,3 +59,28 @@ def send_alert(alert: Dict[str, Any]) -> bool:
     except Exception as e:
         print(f"[telegram] 发送异常: {e}")
         return False
+
+
+def send_daily_report(text: str) -> bool:
+    """
+    发送每日复盘报告到 Telegram（纯文本消息）。
+    读取环境变量 TELEGRAM_BOT_TOKEN 和 TELEGRAM_CHAT_ID。
+    任意一个缺失则静默跳过，返回 False。
+    """
+    token = os.getenv("TELEGRAM_BOT_TOKEN", "").strip()
+    chat_id = os.getenv("TELEGRAM_CHAT_ID", "").strip()
+
+    if not token or not chat_id:
+        return False
+
+    url = _API_BASE.format(token=token)
+    try:
+        with httpx.Client(timeout=15) as client:
+            resp = client.post(url, json={"chat_id": chat_id, "text": text})
+            if resp.status_code == 200 and resp.json().get("ok"):
+                return True
+            print(f"[telegram] 日报发送失败 HTTP {resp.status_code}: {resp.text[:300]}")
+            return False
+    except Exception as e:
+        print(f"[telegram] 日报发送异常: {e}")
+        return False
