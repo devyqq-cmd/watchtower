@@ -70,3 +70,51 @@ def test_send_daily_report_returns_false_on_http_error(monkeypatch):
         result = send_daily_report("report text")
 
     assert result is False
+
+
+# ── Task 2: generate_market_narrative ────────────────────────────────────────
+
+def test_generate_market_narrative_fallback_no_ai(monkeypatch):
+    """With no AI available, rule-based fallback returns a non-empty Chinese string."""
+    monkeypatch.delenv("MINIMAX_API_KEY", raising=False)
+    monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
+
+    from ai.analyst import AINarrativeAnalyst
+    analyst = AINarrativeAnalyst()
+    analyst._claude_cli = None  # disable CLI
+
+    ctx = {
+        "vix": 18.5,
+        "vix_label": "市场偏乐观",
+        "tickers": [
+            {"sym": "0700.HK", "pct_change": 1.2, "risk_score": 45, "rsi": 52.0},
+            {"sym": "INFQ", "pct_change": -0.5, "risk_score": 35, "rsi": 44.0},
+        ],
+        "alerts_count": 0,
+        "news_headlines": ["腾讯Q4净利润超预期", "港股科技板块走强"],
+    }
+    result = analyst.generate_market_narrative(ctx)
+    assert isinstance(result, str)
+    assert len(result) > 0
+
+
+def test_generate_market_narrative_high_risk_ticker_mentioned(monkeypatch):
+    """Fallback narrative mentions the ticker with risk_score > 60."""
+    monkeypatch.delenv("MINIMAX_API_KEY", raising=False)
+    monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
+
+    from ai.analyst import AINarrativeAnalyst
+    analyst = AINarrativeAnalyst()
+    analyst._claude_cli = None
+
+    ctx = {
+        "vix": 28.0,
+        "vix_label": "偏恐慌",
+        "tickers": [
+            {"sym": "0700.HK", "pct_change": -3.5, "risk_score": 75, "rsi": 28.0},
+        ],
+        "alerts_count": 1,
+        "news_headlines": [],
+    }
+    result = analyst.generate_market_narrative(ctx)
+    assert "0700.HK" in result
